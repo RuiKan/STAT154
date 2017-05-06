@@ -1,0 +1,323 @@
+---
+title: "Final"
+author: "Anna Truong"
+date: "4/25/2017"
+output: html_document
+---
+
+#Install Package
+```{r}
+library(lubridate)
+library(randomForest)
+library(glmnet)
+library(tm)
+library(SnowballC)
+library(factoextra)
+library(caret)
+library(corrplot)
+library(plyr)
+data("crude")
+```
+
+
+#Import Data
+```{r}
+user_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_user.csv")[,-1]
+review_train_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_review_train.csv")[,-1]
+review_test_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_review_test.csv")[,-1]
+business_train_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_business_train.csv")[,-1]
+business_test_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_business_test.csv")[,-1]
+
+```
+
+##Choose useful columns
+```{r}
+business_train <- business_train_ori[, names(business_train_ori)%in%c("business_id","is_open","city","review_count")]
+
+business_test <- business_test_ori[,names(business_test_ori)%in%c("business_id","is_open","city","review_count")]
+
+review_train <- review_train_ori[,names(review_train_ori)%in%c("funny","user_id","text","business_id","stars","date","useful","cool")]
+colnames(review_train) <- c("funny_review","user_id","text","business_id","stars","date","useful_review","cool_review")
+
+review_test <- review_test_ori[,names(review_test_ori)%in%c("funny","user_id","text","business_id","date","useful","cool")]
+colnames(review_test) <- c("funny_review","user_id","text","business_id","date","useful_review","cool_review")
+
+user <- user_ori[,!(names(user_ori)%in%c("yelping_since","elite","type","name"))]
+```
+
+##Modify Users
+```{r}
+friends_list = strsplit(as.character(user$friends), ",")
+
+num_friends = c()
+for (i in 1:length(friends_list)) {
+  num_friends[i] = length(friends_list[[i]])
+}
+user$friends = num_friends
+```
+
+#Train Test Dataset
+```{r}
+train.bybusiness <- merge(review_train,business_train,by="business_id")
+train.byuser <- merge(train.bybusiness,user,by="user_id")
+train <- train.byuser[,-c(1:2)]
+
+test.bybusiness <- merge(review_test, business_test, by="business_id")
+test.byuser <- merge(test.bybusiness,user,by="user_id")
+test <- test.byuser[,-c(1:2)]
+```
+
+
+##Wordbank Construction
+```{r}
+#Clean text in train
+text.low_train <- tolower(train$text)
+text_train <- gsub("[^![:^punct:]]", "", text.low_train, perl=T)
+train$text <- gsub('[[:digit:]]+', '', text_train)
+
+#Clean text in test
+text.low_test <- tolower(test$text)
+text_test <- gsub("[^![:^punct:]]", "", text.low_test, perl=T)
+test$text <- gsub('[[:digit:]]+', '', text_test)
+
+
+wordbank.original <- c(unlist(strsplit(test$text, " "), recursive=FALSE),unlist(strsplit(train$text, " "), recursive=FALSE))
+
+
+stopwords <- c('i', 'ive','me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours', 'yourself', 'yourselves', 'he','hes','youre','u','ur','shes','theyre','shes','isnt','arent','im','wont','shouldnt','doesnt','dont','didnt','hasnt','havent','him', 'his', 'himself', 'she', 'her', 'hers','herself', 'it','ill','itll','shell','theyll', 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves','what', 'which', 'who', 'whom', 'this', 'that','where','when','why','how', 'these', 'those', 'am', 'is', 'are','was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does','did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until','while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into','through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down','in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here','there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more','most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so','than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', 'should', 'now','may','0','1','2','3','4','5','6','7','8','9','10', '')
+
+
+wordbank <- unname(wordbank.original[!wordbank.original%in%stopwords])
+wordbank <- wordStem(wordbank, language = "porter")
+wordbank <- names(table(wordbank)[table(wordbank)/length(wordbank)>.0001])
+wordbank <- wordbank[17:length(wordbank)]
+length(wordbank)
+
+write.csv(wordbank,"wordbank.csv",row.names = FALSE)
+length(wordbank)
+```
+
+#Function to clean text
+```{r}
+split <- function(vector) strsplit(vector," ") #split text
+clean.tokens <- function(vector) vector[!(vector %in% stopwords)] #eliminate stopwords
+tokens.stem <- function(strs) wordStem(unlist(strs), language = "porter")#Stem text
+clean.review <- function(list) paste(list, collapse=' ')#Paste them together
+
+```
+
+
+##Train Word Matrix
+```{r}
+
+tokens_train <- sapply(train$text, split)
+clean.tokens_train <- sapply(tokens_train, clean.tokens)
+tokens.stem_train <- lapply(clean.tokens_train, tokens.stem)
+clean.review_train <- lapply(tokens.stem_train, clean.review)
+
+train$text <- clean.review_train
+
+
+train_word_mat <- matrix(nrow = nrow(train), ncol = length(wordbank))
+colnames(train_word_mat) <- wordbank
+
+
+for (i in 1:nrow(train)) {
+  train_word_mat[i,] <- apply(matrix(wordbank),1, FUN = function(x){as.double(grepl(x,train$text[i]))})
+  print(paste(i, "in", nrow(train)))
+}
+write.csv(train_word_mat,"train_word.csv",row.names = FALSE)
+
+train_word <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Re-try/train_word.csv") #load the matrix of text indication of train
+
+ncol(train_word)
+```
+
+
+##Test Word Matrix
+```{r}
+tokens_test <- sapply(test$text, split)
+clean.tokens_test <- sapply(tokens_test, clean.tokens)
+tokens.stem_test <- lapply(clean.tokens_test, tokens.stem)
+clean.review_test <- lapply(tokens.stem_test, clean.review)
+test$text <- clean.review_test
+
+
+test_word_mat <- matrix(nrow = nrow(test), ncol = length(wordbank))
+colnames(test_word_mat) <- wordbank
+for (i in 1:nrow(test)) {
+  test_word_mat[i,] <- apply(matrix(wordbank),1, FUN = function(x){as.double(grepl(x,test$text[i]))})
+  print(paste(i, "in", nrow(test)))
+}
+write.csv(test_word_mat,"test_word.csv",row.names = FALSE)
+test_word <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Re-try/test_word.csv") #load the matrix of text indication of test
+```
+
+
+##Reduce Dimensionality of Text with PCA (Train)
+```{r}
+train_word.pca <- prcomp(train_word, center=TRUE)
+
+eig.val <- get_eigenvalue(train_word.pca)
+text_reduced <- train
+eig.val[which(eig.val$cumulative.variance.percent>95)[1],]
+text.reduced_train <- train_word.pca$x[,c(1:which(eig.val$cumulative.variance.percent>95)[1])] 
+dim(text.reduced_train)
+
+```
+
+#Date Matrix for Train
+```{r}
+
+#Split date data
+train$date <- as.Date(train$date,'%Y-%m-%d')
+train$year <- format(train$date,'%Y')
+train$month <- month(as.POSIXlt(train$date
+,format='%Y-%m-%d'))
+
+
+#Divide months into seasons
+train$winter <- as.double(train$month%in%c("11","12","1"))
+train$spring <- as.double(train$month%in%c("2","3","4"))
+train$summer <- as.double(train$month%in%c("5","6","7"))
+train$fall <- as.double(train$month%in%c("8","9","10"))
+train <- train[,!(names(train)%in%c("winter"))]
+
+#Create Dummy Variable for years
+inds <- unique(train$year)
+
+year_mat <- matrix(ncol=length(unique(train$year)), nrow=length(train$year))
+
+year.f <- factor(train$year)
+year.dummies = model.matrix(~year.f)
+ncol(year.dummies)
+year.train <- year.dummies[,-1] 
+colnames(year.train) <- c("2005","2006","2007","2008","2009","2010","2011","2012","2013","2014","2015","2016","2017")
+ncol(year.train)
+```
+
+##City Matrix for Train
+```{r}
+city.f <- factor(train$city)
+city.dummies_train= model.matrix(~city.f)
+city.train <- city.dummies_train[,-1]
+ncol(city.train)
+```
+
+##Construct x and y train
+```{r}
+X.train.notext <- train[,!(names(train)%in%c("text","stars","date","city","year"))]
+
+X.train <- as.matrix(cbind(text.reduced_train,
+X.train.notext,year.train,city.train))
+
+ncol(X.train)
+colnames(X.train)
+y.train <- train$stars 
+```
+
+##Lasso Model
+```{r}
+lasso_train <- cv.glmnet(x=X.train,y=y.train,alpha=1)
+penalty <- lasso_train$lambda.min
+lasso_train.best <- glmnet(x=X.train,y=y.train,alpha=1,lambda=penalty)
+
+coef_lasso.best <- data.frame(as.matrix(coef(lasso_train.best)))
+
+write.csv(coef_lasso.best,"coef_lasso.best.csv")
+```
+
+#check model
+```{r}
+y.pred_train <- predict(lasso_train.best,newx=X.train)
+sqrt(mean((y.pred_train-y.train)^2))
+
+```
+
+
+#Date Matrix for test
+```{r}
+
+#Split date data
+test$date <- as.Date(test$date,'%Y-%m-%d')
+test$year <- format(test$date,'%Y')
+test$month <- month(as.POSIXlt(test$date
+,format='%Y-%m-%d'))
+
+
+#Divide months into seasons
+test$winter <- as.double(test$month%in%c("11","12","1"))
+test$spring <- as.double(test$month%in%c("2","3","4"))
+test$summer <- as.double(test$month%in%c("5","6","7"))
+test$fall <- as.double(test$month%in%c("8","9","10"))
+test <- test[,!(names(test)%in%c("winter"))]
+
+#Create Dummy Variable for years
+inds <- unique(test$year)
+
+year_mat <- matrix(ncol=length(unique(test$year)), nrow=length(test$year))
+
+year.f <- factor(test$year)
+year.dummies = model.matrix(~year.f)
+ncol(year.dummies)
+year.dummies[,1] <- 0
+year.test <- year.dummies 
+colnames(year.test) <- c("2005","2006","2007","2008","2009","2010","2011","2012","2013","2014","2015","2016","2017")
+```
+
+##City Matrix for Test
+```{r}
+city.f <- factor(test$city)
+city.dummies= model.matrix(~city.f)
+ncol(city.dummies)
+city.test <- city.dummies[,-1]
+ncol(city.test)
+
+```
+
+##Construct X, y Test
+```{r}
+PCA_test <- predict(train_word.pca, newdata=test_word)
+text.reduced_test <- PCA_test[,c(1:which(eig.val$cumulative.variance.percent>95)[1])]
+X.test.notext <- test[,!(names(test)%in%c("text","date","city","year"))]
+
+X.test <- as.matrix(cbind(text.reduced_test,
+X.test.notext,year.test,city.test))
+
+```
+
+##Check Lasso
+```{r}
+check <- predict(lasso_train.best, newx=X.train)
+sqrt(mean((check - y.train)^2))
+a <- data.frame(check, y.train)
+```
+
+##Predict Test Lasso
+```{r}
+y.test <- predict(lasso_train.best, newx=X.test)
+length(y.test)
+length(test$business_id)
+predict_test <- data.frame(test.byuser$business_id,y.test)
+colnames(predict_test) <- c("business_id","stars")
+predict.avg_test <- aggregate(predict_test$stars, by=list(predict_test$business_id), mean)
+colnames(predict.avg_test) <- c("business_id","stars")
+
+result_test <- data.frame(predict.avg_test$business_id,predict.avg_test$stars)
+colnames(result_test) <- c("business_id","stars")
+write.csv(result_test, "result_test_8.csv",row.names = FALSE)
+```
+
+##Model on business only
+```{r}
+train_businessmod <- data.frame(train[, names(train)%in%c("stars","is_open","city","review_count.x","year","month","winter","spring","summer")])
+business.mod_train <- lm(stars~.,data=train_businessmod)
+summary(business.mod_train)
+```
+
+
+
+
+
+
+
