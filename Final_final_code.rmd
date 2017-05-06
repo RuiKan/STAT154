@@ -1,0 +1,353 @@
+---
+title: "Final"
+author: "Charles Zhu"
+date: "4/25/2017"
+output: html_document
+---
+
+```{r setup}
+library(SnowballC)
+library(glmnet)
+library(randomForest)
+library(pls)
+library(ranger)
+library(factoextra)
+library(DAAG)
+library(caretEnsemble)
+library(caret)
+library(mlbench)
+library(nnet)
+library(MASS)
+```
+
+```{r function}
+
+#Converting whole number to integer/2
+normalize <- function(x) {
+  x <- round(x*2, 0)/2
+  x <- ifelse(x>=5, 5, ifelse(x<=1, 1, x))
+}
+
+#Calculating prediction precision
+precision <- function(prediction, true) {
+  return(sum(prediction==true)/length(true))
+}
+
+#Calculating RMSE of the prediction
+rmse <- function(prediction, true) {
+  return(sqrt(mean((prediction-true)^2)))
+}
+
+#Create new variable indicating if the review is from an elite user
+get_elite_train <- function(i) {
+  print(paste(i,"in",length(train.not.useful$review_year)))
+  return(grepl(train.not.useful$review_year[i],train.not.useful$elite)[i])
+}
+
+get_elite_test <- function(i) {
+  print(paste(i,"in",length(test.not.useful$review_year)))
+  return(grepl(test.not.useful$review_year[i],test.not.useful$elite)[i])
+}
+
+```
+
+
+```{r cleanup}
+#Read datasets and subset with only useful columns
+
+yelp_academic_dataset_business_test <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_business_test.csv")[,-c(1,2,17)]
+
+yelp_academic_dataset_business_train <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_business_train.csv")[,-c(1,17)]
+
+yelp_academic_dataset_checkin <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_checkin.csv")[,-c(1,3)]
+
+yelp_academic_dataset_review_test <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_review_test.csv", comment.char="#")[,-c(1,9)]
+colnames(yelp_academic_dataset_review_test) <- c("funny_review", colnames(yelp_academic_dataset_review_test)[-c(1,4,5,6,7,8)], "review_text", "business_id", "date", "useful_review", "cool_review")
+
+yelp_academic_dataset_review_train <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_review_train.csv", comment.char="#")[,-c(1,10)]
+colnames(yelp_academic_dataset_review_train) <- c("funny_review", colnames(yelp_academic_dataset_review_train)[-c(1,4,5,6,7,8,9)], "review_text", "business_id", "review_stars", "date", "useful_review", "cool_review")
+
+yelp_academic_dataset_tip <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_tip.csv")[,-c(1,7)]
+colnames(yelp_academic_dataset_tip) <- c("user_id", "tip_text",  colnames(yelp_academic_dataset_tip)[-c(1,2)])
+
+yelp_academic_dataset_user <- read.csv("~/Dropbox/SP17Charles/Stat 154/Final Project/yelp_academic_dataset_user.csv")[,-c(1,11,22)]
+colnames(yelp_academic_dataset_user) <- c("yelping_since", "user_useful", colnames(yelp_academic_dataset_user)[c(3:10)], "user_funny",  colnames(yelp_academic_dataset_user)[c(12:18)], "user_cool", colnames(yelp_academic_dataset_user)[c(20,21)])
+
+#Merge review_train dataset with business_train dataset
+train <- merge(yelp_academic_dataset_review_train,yelp_academic_dataset_business_train, by = "business_id")
+#Do the same for test sets
+test <- merge(yelp_academic_dataset_review_test,yelp_academic_dataset_business_test, by = "business_id")
+
+#Merge the previous big dataset with users dataset
+train <- merge(train, yelp_academic_dataset_user, by = "user_id")
+#Do the same for test set
+test <- merge(test, yelp_academic_dataset_user, by = "user_id")
+
+#Fetch train set stars as y 
+train.y <- train$review_stars
+train.validate <- train$stars
+train <- train[,!names(train)=="stars"]
+train <- train[,!names(train)=="review_stars"]
+
+#Discard any string variables as not useful column, and save the integer variables
+useful_col <- c(3, 7, 8, 11, 16, 23:28, 30:36, 38:41)
+train.not.useful <- train[,-useful_col]
+test.not.useful <- test[,-useful_col]
+train <- train[,useful_col]
+test <- test[,useful_col]
+
+#Organizing reveiw text into bag of words
+#Take out punctuation
+test.not.useful$review_text <- gsub("[[:punct:]]", "", test.not.useful$review_text)
+train.not.useful$review_text <- gsub("[[:punct:]]", "", train.not.useful$review_text)
+yelp_academic_dataset_tip$tip_text <- gsub("[[:punct:]]", "", yelp_academic_dataset_tip$tip_text)
+
+#Getting review year
+train.not.useful$review_year = substr(as.character(train.not.useful$date), 1, 4)
+test.not.useful$review_year = substr(as.character(test.not.useful$date), 1, 4)
+
+#Getting review month
+train.not.useful$review_month = substr(as.character(train.not.useful$date), 6, 7)
+test.not.useful$review_month = substr(as.character(test.not.useful$date), 6, 7)
+
+#Creating seasonality variable 
+train.not.useful$winter <- as.double(train.not.useful$review_month%in%c("11","12","01"))
+train.not.useful$spring <- as.double(train.not.useful$review_month%in%c("02","03","04"))
+train.not.useful$summer <- as.double(train.not.useful$review_month%in%c("05","06","07"))
+
+#Do the same for test
+test.not.useful$winter <- as.double(test.not.useful$review_month%in%c("11","12","01"))
+test.not.useful$spring <- as.double(test.not.useful$review_month%in%c("02","03","04"))
+test.not.useful$summer <- as.double(test.not.useful$review_month%in%c("05","06","07"))
+
+#Getting elite status of the review (If the review is given by an elite user)
+train.not.useful$elite_status <- sapply(c(1:length(train.not.useful$review_year)), get_elite_train)
+train.not.useful$elite_status <- as.double(train.not.useful$elite_status)
+
+#Do the same for test set
+test.not.useful$elite_status <- sapply(c(1:length(test.not.useful$review_year)), get_elite_test)
+test.not.useful$elite_status <- as.double(test.not.useful$elite_status)
+
+#Getting the number of year user has been yelping
+train.not.useful$yelping_since <- substr(as.character(train.not.useful$yelping_since), 1, 4)
+train.not.useful$yelp_age = 2017 - as.numeric(train.not.useful$yelping_since)
+
+#Do the same for test
+test.not.useful$yelping_since <- substr(as.character(test.not.useful$yelping_since), 1, 4)
+test.not.useful$yelp_age = 2017 - as.numeric(test.not.useful$yelping_since)
+
+#Getting the number of friends each user has
+train_friends_list <- strsplit(as.character(train.not.useful$friends), ",")
+train_num_friends <- c()
+
+for (i in 1:length(train_friends_list)) {
+  train_num_friends[i] <- length(train_friends_list[[i]])
+}
+train.not.useful$num_friends <- train_num_friends
+
+#Do the same for test
+test_friends_list <- strsplit(as.character(test.not.useful$friends), ",")
+test_num_friends <- c()
+
+for (i in 1:length(test_friends_list)) {
+  test_num_friends[i] <- length(test_friends_list[[i]])
+}
+test.not.useful$num_friends <- test_num_friends
+
+#Combining text features with other features created
+train <- data.frame(train, train.not.useful[,c(21:23)])
+test <- data.frame(test, test.not.useful[, c(21:23)])
+
+#Generating word bank from the review texts and tips
+wordbank <- c(unlist(strsplit(test.not.useful$review_text, " "), recursive=FALSE),unlist(strsplit(train.not.useful$review_text, " "), recursive=FALSE),unlist(strsplit(yelp_academic_dataset_tip$tip_text, " "), recursive=FALSE))
+
+#to lower case
+wordbank <- sapply(wordbank, tolower)
+
+#Vector of stop words
+stopwords <- c('i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', 'her', 'hers','herself', 'it', 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves','what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those', 'am', 'is', 'are','was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does','did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until','while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into','through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down','in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here','there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more','most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so','than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', 'should', 'now', '')
+
+#Removing stop words, striping by word stem, removing infrequent words
+wordbank <- unname(wordbank[!wordbank%in%stopwords])
+wordbank <- wordStem(wordbank, language = "porter")
+wordbank <- names(table(wordbank)[table(wordbank)/length(wordbank)>1e-04])
+wordbank <- wordbank[38:length(wordbank)]
+
+#Creating document term matrix
+test_word_mat <- matrix(nrow = nrow(test), ncol = length(wordbank))
+colnames(test_word_mat) <- wordbank
+for (i in 1:nrow(test)) {
+  test_word_mat[i,] <- apply(matrix(wordbank),1, FUN = function(x){as.double(grepl(x,test.not.useful$review_text[i]))})
+  print(paste(i, "in", nrow(test)))
+}
+
+#Creating document term matrix
+train_word_mat <- matrix(nrow = nrow(train), ncol = length(wordbank))
+colnames(train_word_mat) <- wordbank
+for (i in 1:nrow(train)) {
+  train_word_mat[i,] <- apply(matrix(wordbank),1, FUN = function(x){as.double(grepl(x,train.not.useful$review_text[i]))})
+  print(paste(i, "in", nrow(train)))
+}
+
+#Combining train set with the document term matrix
+train <- cbind(train, train_word_mat)
+test <- cbind(test, test_word_mat)
+write.csv(train, "train.csv")
+write.csv(test, "test.csv")
+
+#output csv files
+write.csv(test.not.useful$elite_status, "test_elite.csv", row.names = FALSE)
+write.csv(train.not.useful$elite_status, "train_elite.csv", row.names = FALSE)
+
+write.csv(data.frame("business_id" = train.not.useful$business_id, "review_stars" = train.y, "business_stars" = train.validate), "indiv_stars.csv", row.names = FALSE)
+
+#Aggregating reviews by business id, to get the mean stars for each business
+train.agg <- aggregate(train, by = list(train.not.useful$business_id), mean)
+train.validate.agg <- aggregate(data.frame(train.validate), by = list(train.not.useful$business_id), mean)
+test.agg <- aggregate(test, by = list(test.not.useful$business_id), mean)
+```
+
+```{r PC}
+#PCA to reduce the number of components
+pc_train <- prcomp(train_word_mat, center = TRUE)
+eig_pc_train <- get_eigenvalue(pc_train)
+pc_train_vectors <- pc_train$x[,c(1:which(eig_pc_train$cumulative.variance.percent>95)[1])]
+
+train.pca <- data.frame(train[1:(ncol(train)-ncol(train_word_mat))],pc_train_vectors)
+test.pca <- data.frame(test[1:(ncol(test)-ncol(test_word_mat))],pc_test_vectors)
+
+train.pca.agg <- aggregate(train.pca, by = list(train.not.useful$business_id), mean)
+test.pca.agg <- aggregate(test.pca, by = list(test.not.useful$business_id), mean)
+
+pc_test <- prcomp(test_word_mat, center = TRUE)
+pc_test_vectors <- pc_test$x[,c(1:which(eig_pc_train$cumulative.variance.percent>95)[1])]
+
+pc_train_vectors <- cbind(train[,1:25], pc_train)
+pc_test_vectors <- cbind(test[,1:25], pc_test)
+
+plot(pc_train$sdev)
+sum(pc_train$sdev[1:1000])/sum(pc_train$sdev)
+
+pc_train_vectors_agg <- aggregate(pc_train_vectors, by =  list(train.not.useful$business_id), mean)
+pc_test_vectors_agg <- aggregate(pc_test_vectors, by =  list(test.not.useful$business_id), mean)
+```
+
+```{r fold}
+#Creating folds
+nfold <- 10
+fold <- c()
+n <- nrow(train)
+n_agg <- nrow(train.agg)
+for (i in 1:nfold) {
+  fold <- c(fold, rep(i, ceiling(n / nfold)))
+}
+fold <- sample(fold, size = n, replace = FALSE)
+
+fold_agg <- c()
+for (i in 1:nfold) {
+  fold_agg <- c(fold_agg, rep(i, ceiling(n_agg / nfold)))
+}
+fold_agg <- sample(fold_agg, size = n_agg, replace = FALSE)
+```
+
+```{r aggregate models}
+#LASSO
+agg_model_lasso <- cv.glmnet(as.matrix(train.agg[,-1]), train.validate.agg[,2], alpha = 1, type.measure = "class", foldid = fold_agg)
+lasso_agg_stars <- predict.cv.glmnet(agg_model_lasso, as.matrix(train.agg[,-1]), type = "response")
+agg_lasso_rmse <- rmse(lasso_agg_stars,train.validate.agg[,2])
+agg_lasso_precision <- precision(normalize(lasso_agg_stars),train.validate.agg[,2])
+
+#Ridge
+agg_model_ridge <- cv.glmnet(as.matrix(train.agg[,-1]), train.validate.agg[,2], alpha = 0, type.measure = "class", foldid = fold_agg)
+ridge_agg_stars <- predict.cv.glmnet(agg_model_ridge, as.matrix(train.agg[,-1]), type = "response")
+agg_ridge_rmse <- rmse(ridge_agg_stars,train.validate.agg[,2])
+agg_ridge_precision <- precision(normalize(ridge_agg_stars),train.validate.agg[,2])
+
+#lm
+agg_model_lm <- lm(train.validate.agg$train.validate ~., data = train.agg[,-1])
+lm_agg_stars <- predict.lm(agg_model_lm, newdata = train.agg[,-1])
+agg_lm_precision <- precision(normalize(lm_agg_stars),train.validate.agg[,2])
+
+agg_model_rf <- ranger(stars ~., data.frame("stars"=train.validate.agg$train.validate, train.agg))
+rf_agg_stars <- agg_model_rf$predictions
+agg_rf_rmse <- rmse(rf_agg_stars,train.validate.agg[,2])
+agg_rf_precision <- precision(normalize(rf_agg_stars),train.validate.agg[,2])
+```
+
+```{r stacked models}
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, savePredictions=TRUE, classProbs=TRUE)
+algorithmList <- c('svmRadial', 'treebag', 'glmboost', 'glm', 'knn')
+models <- caretList(stars ~.,  data.frame("stars"=train.validate.agg$train.validate, train.agg[,-1]), trControl=control, methodList=algorithmList)
+results <- resamples(models)
+summary(results)
+dotplot(results)
+stackControl <- trainControl(method="repeatedcv", number=10, repeats=3, savePredictions=TRUE, classProbs=TRUE)
+stack.glm <- caretStack(models, method="glm", metric="RMSE", trControl=stackControl)
+print(stack.glm)
+
+prediction_models <- c('glmboost', 'spls', 'foba', 'pcr')
+prediction_models <- c('foba')
+models_result <- caretList(stars ~.,  data.frame("stars"=train.validate.agg$train.validate, train.agg[,-1]), trControl=control, methodList=prediction_models)
+resamp_models_result <- resamples(models_result)
+summary(resamp_models_result)
+dotplot(resamp_models_result)
+stackControl <- trainControl(method="repeatedcv", number=10, repeats=3, savePredictions=TRUE, classProbs=TRUE)
+stack.glm <- caretStack(resamp_models_result, method="glm", metric="RMSE", trControl=stackControl)
+print(stack.glm)
+```
+
+```{r pc aggregate model}
+pc_agg_model_lasso <- cv.glmnet(as.matrix(train.pca.agg[,-1]), train.validate.agg[,2], alpha = 1, type.measure = "class", foldid = fold_agg)
+lasso_pc_agg_stars <- predict.cv.glmnet(pc_agg_model_lasso, as.matrix(train.pca.agg[,-1]), type = "response")
+pc_agg_lasso_rmse <- rmse(lasso_pc_agg_stars,train.validate.agg[,2])
+pc_agg_lasso_precision <- precision(normalize(lasso_agg_stars),train.validate.agg[,2])
+
+pc_agg_model_ridge <- cv.glmnet(as.matrix(train.pca.agg[,-1]), train.validate.agg[,2], alpha = 0, type.measure = "class", foldid = fold_agg)
+ridge_pc_agg_stars <- predict.cv.glmnet(pc_agg_model_ridge, as.matrix(train.pca.agg[,-1]), type = "response")
+pc_agg_ridge_rmse <- rmse(ridge_pc_agg_stars,train.validate.agg[,2])
+pc_agg_ridge_precision <- precision(normalize(ridge_agg_stars),train.validate.agg[,2])
+```
+
+```{r pc individual models}
+indiv_model_lasso <- cv.glmnet(as.matrix(pc_train_vectors), train.y, alpha = 1, type.measure = "class", foldid = fold)
+lasso_indiv_stars <- predict.cv.glmnet(indiv_model_lasso, as.matrix(pc_train_vectors), type = "response")
+indiv_lasso_rmse <- rmse(aggregate(lasso_indiv_stars, by = list(train.not.useful$business_id), mean)[,2], train.validate.agg[,2])
+indiv_lasso_precision <- precision(normalize(aggregate(lasso_indiv_stars, by = list(train.not.useful$business_id), mean)[,2]), train.validate.agg[,2])
+
+indiv_model_lm <- lm(train.y ~., data.frame(pc_train_vectors))
+lm_indiv_stars <- predict.lm(indiv_model_lm, data.frame(pc_train_vectors))
+cv.lm(data.frame(pc_train_vectors), indiv_model_lm, m = 10)
+indiv_lm_precision <- precision(normalize(aggregate(lm_indiv_stars, by = list(train.not.useful$business_id), mean)[,2]), train.validate.agg[,2])
+```
+
+```{r individual models}
+pc_ridge_pred <- predict.cv.glmnet(pc_agg_model_ridge, newx = as.matrix(test.pca.agg[,-1]), type = "response")
+pc.ridge.result <- data.frame("business_id" = test.pca.agg[,1],"stars" = pc_ridge_pred)
+names(pc.ridge.result) <- c("business_id", "stars")
+write.csv(pc.ridge.result, "result.pc.ridge.csv", row.names = FALSE)
+
+pc_lasso_pred <- predict.cv.glmnet(pc_agg_model_lasso, newx = as.matrix(test.pca.agg[,-1]), type = "response")
+pc.lasso.result <- data.frame("business_id" = test.pca.agg[,1],"stars" = pc_lasso_pred)
+names(pc.lasso.result) <- c("business_id", "stars")
+write.csv(pc.lasso.result, "result.pc.lasso.csv", row.names = FALSE)
+
+stacked <- data.frame(submission$business_id, rowMeans(data.frame(`result_test_6(aggr,lasso,rf,not.round)`$stars, `result_test_3(aggr,lasso,.not.round)`$stars, submission$stars)))
+names(stacked) <- c("business_id", "stars")
+write.csv(stacked, "stacked_result.csv", row.names = FALSE)
+
+stacked.2 <- data.frame(submission$business_id, data.frame(normalize(`result_test_6(aggr,lasso,rf,not.round)`$stars), normalize(`result_test_3(aggr,lasso,.not.round)`$stars), normalize(submission$stars)))
+for(i in 1:nrow(stacked.2)){
+  stacked.2[i,5] <- median(c(stacked.2[i,2], stacked.2[i,3], stacked.2[i,4]))
+}
+stacked.2 <- data.frame(stacked.2[,1], stacked.2[,5], stacked.2[,c(2, 3, 4)])
+names(stacked.2) <- c("business_id", "stars", "stars.1", "stars.2", "stars.3")
+```
+
+
+```{r result}
+result_table <- t(data.frame("Agg RF" = c(agg_rf_precision, agg_rf_rmse), "Agg Lasso" = c(agg_lasso_precision, agg_lasso_rmse), "Agg Ridge" = c(agg_ridge_precision, agg_ridge_rmse),"Agg Lasso with PCA" =  c(agg_pca_lasso_precision, agg_pca_lasso_rmse),"Indiv Lasso" = c(indiv_lasso_precision, indiv_lasso_rmse),"Agg Lasso on RF PCA" = c(agg_rf_pca_lasso_precision, agg_rf_pca_lasso_rmse),"Agg Ridge with Full Variables" =  c(agg_ridge_full_model_precision, agg_rige_full_model_rmse)))
+colnames(result_table) <- c("Precision", "RMSE")
+stargazer::stargazer(result_table, out = "result.htm", title = "Cross Validated Results")
+```
+
