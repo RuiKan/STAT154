@@ -1,0 +1,310 @@
+---
+title: "Final"
+author: "Anna Truong"
+date: "4/25/2017"
+output: html_document
+---
+
+#Install Package
+```{r}
+library(glmnet)
+library(tm)
+library(SnowballC)
+library(factoextra)
+library(randomForest)
+library(caret)
+library(corrplot)
+library(plyr)
+data("crude")
+```
+
+
+#Import Data
+```{r}
+user <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_user.csv")[,-1]
+review_train_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_review_train.csv")[,-1]
+review_test_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_review_test.csv")[,-1]
+business_train_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_business_train.csv")[,-1]
+business_test_ori <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Data/yelp_academic_dataset_business_test.csv")[,-1]
+
+train_word <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Re-try/train_word.csv")
+test_word <- read.csv("/Users/aitruong/Dropbox/Sp17/Stat154/Final Project/Re-try/test_word.csv")
+ncol(train_word)
+ncol(test_word)
+
+review_train <- review_train_ori[,names(review_train_ori)%in% c("funny","user_id","text","business_id","stars","useful","cool")]
+colnames(review_train) <- c("funny_review","user_id","text","business_id","stars_review", "useful_review","cool_review")
+
+review_test <- review_test_ori[ ,names(review_test_ori)%in% c("funny","user_id","text","business_id","useful","cool")]
+colnames(review_test) <- c("funny_review","user_id","text","business_id","useful_review","cool_review")
+
+
+business_test <- business_test_ori[, names(business_test_ori)%in%c("business_id","is_open","city","review_count")]
+colnames(business_test) <- c("business_id","is_open","city","review_count_business")
+
+business_train <- business_train_ori[, names(business_train_ori)%in%c("business_id","is_open","city","review_count")]
+colnames(business_train) <- c("business_id","is_open","city","review_count_business")
+```
+
+#Train Test Dataset
+```{r}
+#TRAIN
+train.bybusiness <- merge(review_train,business_train,by="business_id")
+train.byuser <- merge(train.bybusiness,user,by="user_id")
+train <- train.byuser[,names(train.byuser)%in% c("business_id","funny_review","stars_review","useful_review","cool_review","is_open","city","review_count_business","useful","compliment_photos","compliment_list","compliment_funny","compliment_plain","review_count","fans","compliment_not","funny","compliment_writer","compliment_cute","average_stars","compliment_more","friends","compliment_hot","cool","compliment_profile","compliment_cool")]
+
+#count number of friends they have
+friends_list = strsplit(as.character(train$friends), ",")
+num_friends = c()
+
+for (i in 1:length(friends_list)) {
+  num_friends[i] = length(friends_list[[i]])
+}
+friends = num_friends
+
+city.f <- factor(train$city)
+city <- model.matrix(~city.f)[,-1]
+ncol(city)
+
+train.aggr <- data.frame(train[,!(names(train)%in%c("city","friends"))],friends,city,train_word)
+
+
+
+#TEST
+test.bybusiness <- merge(review_test,business_test,by="business_id")
+test.byuser <- merge(test.bybusiness,user,by="user_id")
+test <- test.byuser[,names(test.byuser)%in% c("business_id","funny_review","stars_review","useful_review","cool_review","is_open","city","review_count_business","useful","compliment_photos","compliment_list","compliment_funny","compliment_plain","review_count","fans","compliment_not","funny","compliment_writer","compliment_cute","average_stars","compliment_more","friends","compliment_hot","cool","compliment_profile","compliment_cool")]
+
+
+#count number of friends they have
+friends_list = strsplit(as.character(test$friends), ",")
+num_friends = c()
+
+for (i in 1:length(friends_list)) {
+  num_friends[i] = length(friends_list[[i]])
+}
+friends = num_friends
+
+city.f <- factor(test$city)
+city <- model.matrix(~city.f)[,-1]
+ncol(city)
+
+test.aggr <- data.frame(test[,!(names(test)%in%c("city","friends"))],friends,city,test_word)
+ncol(test_word)
+ncol(train_word)
+ncol(test)
+ncol(train)
+ncol(test.aggr)
+ncol(train.aggr)
+colnames(train.aggr[,-1])
+
+```
+
+##Aggregate Train and Test
+```{r}
+train.aggr.mean <- aggregate(train.aggr[,-1], by=list(train.aggr$business_id), mean) 
+
+test.aggr.mean <- aggregate(test.aggr[,-1], by=list(test.aggr$business_id), mean) 
+
+
+train_word.mean <- train.aggr.mean[,c(which(colnames(train.aggr.mean)=="abl"):ncol(train.aggr.mean))]
+test_word.mean <- test.aggr.mean[,c(which(colnames(test.aggr.mean)=="abl"):ncol(test.aggr.mean))]
+
+```
+
+##Set Seed
+```{r}
+set.seed(227)
+```
+
+
+##Reduce Dimensionality of Text with PCA
+```{r}
+train_word.pca <- prcomp(train_word.mean, center=TRUE, scale=TRUE)
+eig.val <- get_eigenvalue(train_word.pca)
+text_reduced <- train
+eig.val[which(eig.val$cumulative.variance.percent>97)[1],]
+text.reduced_train <- train_word.pca$x[,c(1:which(eig.val$cumulative.variance.percent>97)[1])] 
+dim(text.reduced_train)
+nrow(train.aggr.mean)
+```
+
+##Construct X and y for train
+```{r}
+#Construct y
+y.train <- train.aggr.mean$stars_review 
+
+#Construct X
+train.aggr.mean.nostar.nobusinessid <- train.aggr.mean[,!(names(train.aggr.mean)%in%c("stars_review","Group.1"))]
+
+X.train<- as.matrix(data.frame(train.aggr.mean.nostar.nobusinessid[,-c(which(colnames(train.aggr.mean.nostar.nobusinessid)=="abl"):ncol(train.aggr.mean.nostar.nobusinessid))],text.reduced_train))
+
+```
+
+
+##Lasso Model 
+```{r}
+lasso_train <- cv.glmnet(x=X.train,y=y.train,alpha=1)
+penalty.lasso <- lasso_train$lambda.min
+lasso_train.best <- glmnet(x=X.train,y=y.train,alpha=1,lambda=penalty.lasso)
+coef(lasso_train.best)
+```
+
+##Check Model Lasso
+```{r}
+ypred_train <- predict(lasso_train.best, newx=X.train)
+rmse_lasso <- sqrt(mean((ypred_train-y.train)^2))
+rmse_lasso
+```
+
+
+##Ridge Model 
+```{r}
+ridge_train <- cv.glmnet(x=X.train,y=y.train,alpha=0)
+penalty.ridge <- ridge_train$lambda.min
+ridge_train.best <- glmnet(x=X.train,y=y.train,alpha=0,lambda=penalty.ridge)
+coef(ridge_train.best)
+```
+
+##Check Model Ridge
+```{r}
+ypred_train <- predict(ridge_train.best, newx=X.train)
+rmse_ridge <- sqrt(mean((ypred_train-y.train)^2))
+rmse_ridge
+```
+
+
+
+##Construct X and y in Test
+```{r}
+PCA_test <- predict(train_word.pca, newdata=test_word.mean)
+
+text.reduced_test <- PCA_test[,c(1:which(eig.val$cumulative.variance.percent>97)[1])]
+
+#Construct X
+test.aggr.mean.nostar.nobusinessid <- test.aggr.mean[,!(names(test.aggr.mean)%in%c("stars_review","Group.1"))]
+
+X.test<- as.matrix(data.frame(test.aggr.mean.nostar.nobusinessid[,-c(which(colnames(test.aggr.mean.nostar.nobusinessid)=="abl"):ncol(test.aggr.mean.nostar.nobusinessid))],text.reduced_test))
+
+```
+
+
+
+
+##Predict Test Lasso 
+```{r}
+y.test <- predict(lasso_train.best, newx=X.test)
+predict.lasso_test <- data.frame(test.aggr.mean[,1],y.test)
+colnames(predict.lasso_test) <- c("business_id","stars")
+write.csv(predict.lasso_test, "lasso_aggregate.csv",row.names = FALSE)
+```
+
+
+
+##Predict on Test Ridge 
+```{r}
+y.test <- predict(ridge_train.best, newx=X.test,, predict.all=FALSE)
+predict.ridge_test <- data.frame(test.aggr.mean[,1],y.test)
+colnames(predict.ridge_test ) <- c("business_id","stars")
+write.csv(predict.ridge_test, "ridge_aggregate.csv",row.names = FALSE)
+```
+
+
+##Random Forest Model 
+```{r}
+train_rf <- data.frame(y.train,X.train)
+rf_train <- randomForest(y.train~., data=train_rf)
+which.min(rf_train$mse)
+rf_train.best <- randomForest(y.train~., data=train_rf,ntree=which.min(rf_train$mse))
+
+```
+
+##Check Model RF
+```{r}
+ypred_train <- predict(rf_train.best, newx=X.train)
+rmse_rf <- sqrt(mean((ypred_train-y.train)^2))
+rmse_rf
+```
+
+##Predict on Test RF not cleaned
+```{r}
+y.test <- predict(rf_train.best, newdata=X.test)
+predict.rf_test <- data.frame(test.aggr.mean[,1],y.test)
+colnames(predict.rf_test) <- c("business_id","stars")
+write.csv(predict.rf_test, "rf_aggregate.csv",row.names = FALSE)
+```
+
+
+
+#Extra Data Cleaning
+```{r}
+#Construct train data
+train.dt <- data.frame(y.train, X.train)
+
+# Remove Zero and Near Zero-Variance Predictors
+nzv <- nearZeroVar(train.dt)
+nzv
+
+# Calculate correlation matrix
+descrCor <- cor(train.dt)
+print(descrCor) # Print correlation matrix
+summary(descrCor[upper.tri(descrCor)])
+
+# find attributes that are highly corrected
+highlyCorrelated <- findCorrelation(descrCor, cutoff=0.9)
+highlyCorrelated 
+highlyCorCol <- colnames(train.dt)[highlyCorrelated]
+
+# Remove highly correlated variables and create a new dataset
+train.dt_clean <- train.dt[, -which(colnames(train.dt) %in% highlyCorCol)]
+dim(train.dt_clean)
+
+#Train Random Forest
+rf <-randomForest(y.train~.,data=train.dt_clean, importance=TRUE,ntree=1000)
+
+#Evaluate variable importance
+imp = importance(rf, type=1)
+imp <- data.frame(predictors=rownames(imp),imp)
+
+# Order the predictor levels by importance
+imp.sort <- arrange(imp,desc(imp$X.IncMSE))
+imp.sort$predictors <- factor(imp.sort$predictors,levels=imp.sort$predictors)
+
+# Select the top  predictors
+imp.top <- imp.sort[1:599,]
+
+# Subset data with 599 independent and 1 dependent variables
+train.clean = cbind(stars = train.dt_clean$y.train, train.dt_clean[, as.character(imp.top$predictors)])
+
+
+```
+
+
+
+```{r}
+X_cleantest <- X.test[,as.character(imp.top$predictors)]
+train.clean <- data.frame(y.train, X_cleantest)
+```
+
+
+##Lasso Model on cleaned train
+```{r}
+set.seed(50)
+lasso_cleantrain <- cv.glmnet(x=as.matrix(train.clean[,-1]),y=train.clean$stars,alpha=1)
+penalty.cleanlasso <- lasso_cleantrain$lambda.min
+lasso_cleantrain.best <- glmnet(x=as.matrix(train.clean[,-1]),y=train.clean$stars,alpha=1,lambda=penalty.cleanlasso)
+coef(lasso_cleantrain.best)
+y.train_pred <- predict(lasso_cleantrain.best, newx = as.matrix(train.clean[,-1]))
+sqrt(mean((y.train-y.train_pred)^2))
+```
+
+##ridge Model on cleaned train
+```{r}
+set.seed(50)
+ridge_cleantrain <- cv.glmnet(x=as.matrix(train.clean[,-1]),y=train.clean$stars,alpha=1)
+penalty.cleanridge <- ridge_cleantrain$lambda.min
+ridge_cleantrain.best <- glmnet(x=as.matrix(train.clean[,-1]),y=train.clean$stars,alpha=1,lambda=penalty.cleanridge)
+coef(ridge_cleantrain.best)
+y.train_pred <- predict(ridge_cleantrain.best, newx = as.matrix(train.clean[,-1]))
+sqrt(mean((y.train-y.train_pred)^2))
+```
