@@ -1,0 +1,256 @@
+---
+title: "STAT154 Final"
+author: "Rui (Karen) Kan"
+date: "5/5/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd("/Users/KarenRuiKan/Desktop/Spring2017/STAT154/Final_Project")
+source("ClassificationMetrics.R")
+library(kernlab)
+library(tm)
+library(glmnet)
+library(nnet)
+library(e1071)
+```
+
+```{r}
+cleanReview = function(review, stop_words=stopWords){
+  # In your project, you could modify this function 
+  # to modify a review however you'd like (e.g. 
+  # add more stop words or spell checker -
+  # This is a VERY preliminary version 
+  # of this function)
+  
+  # Lowercase review 
+  lower_txt = tolower(review)
+  # Remove punctuation - (might want to keep !)
+  lower_txt = gsub("[[:punct:]]", " ", lower_txt)
+  # Tokenize review 
+  tokens = strsplit(lower_txt, ' ')[[1]]
+  # Remove stop words 
+  clean_tokens = tokens[!(tokens %in% stopWords)]
+  clean_review = paste(clean_tokens, collapse=' ')
+  return(clean_review)
+}
+
+cleanCorpus = function(corpus){
+  # You can also use this function instead of the first. 
+  # Here you clean all the reviews at once using the 
+  # 'tm' package. Again, a lot more you can add to this function...
+  
+  review_corpus = tm_map(corpus, content_transformer(tolower))
+  review_corpus = tm_map(review_corpus, removeNumbers)
+  review_corpus = tm_map(review_corpus, removePunctuation)
+  review_corpus = tm_map(review_corpus, removeWords, c("the", "and", stopwords("english")))
+  review_corpus =  tm_map(review_corpus, stripWhitespace)
+}
+```
+
+```{r}
+review_train = read.csv('data/yelp_academic_dataset_review_train.csv')
+
+#getting train dataset
+try_data = review_train[,c(5:7)]
+business = aggregate(try_data, by = list(try_data$business_id), FUN = paste, na.rm = TRUE)
+business = business[,c(2,4)]
+
+#counting number of business by each review
+count_reviews = aggregate(try_data, by = list(try_data$business_id), FUN = paste, na.rm = TRUE)
+business_count = read.csv("data/yelp_academic_dataset_business_train.csv")[,c(3,10)]
+colnames(count_reviews) = c("business_id", "text", "business_id_unused", "stars_unused")
+business_review_count = merge(count_reviews, business_count, by = "business_id")
+num_reviews = business_review_count$review_count
+
+#getting stars dataset
+try_data1 = review_train[,c(6,7)]
+stars_by_business = aggregate(try_data1, by = list(try_data1$business_id), FUN = mean, na.rm = TRUE )
+stars_by_business = stars_by_business[,3]
+
+reviews = as.vector(business$text)
+stopWords = c(stopwords("en"), "") 
+
+clean_reviews = sapply(reviews, function(review) cleanReview(review))
+review_corpus = Corpus(VectorSource(clean_reviews))
+
+# If you use the 'cleanCorpus' function you would do 
+review_corpus = cleanCorpus(Corpus(VectorSource(reviews)))
+
+# Check out how first review looks like 
+inspect(review_corpus[1])
+
+# Create document term matrix - try TD-IDF
+review_dtm = DocumentTermMatrix(review_corpus)
+
+# Remove less frequent words
+review_dtm = removeSparseTerms(review_dtm, 0.8)
+inspect(review_dtm[1:8,1:20])
+
+# Fit linear regression to it  
+X_train = as.matrix(review_dtm)
+X_train_normalized_by_review_count = X_train/num_reviews
+y_train = stars_by_business
+
+
+#loading test dataset
+business_test = read.csv("data/yelp_academic_dataset_business_test.csv")[,-c(1,2,5,7,12,13,15,16,17)]
+review_test = read.csv("data/yelp_academic_dataset_review_test.csv")[,-c(1,7,9)]
+business_count_test = read.csv("data/yelp_academic_dataset_business_test.csv")[,c(4,11)]
+
+
+#whatever I did for train, do it for test
+
+review_test = review_test[review_test$business_id %in% business_count_test$business_id,]
+
+try_data_test = review_test[,c(4,5)]
+
+count_reviews_test = aggregate(try_data_test, by = list(try_data_test$business_id), FUN = paste, na.rm = TRUE)
+colnames(count_reviews_test) = c("business_id", "text", "business_id_unused")
+
+count_reviews_test = count_reviews_test[count_reviews_test$business_id %in% business_count_test$business_id,]
+
+business_test = aggregate(try_data_test, by = list(try_data_test$business_id), FUN = paste, na.rm = TRUE)
+business_test = business_test[,c(1,2)]
+
+#counting number of business by each review
+business_review_count_test = merge(count_reviews_test, business_count_test, by = "business_id")
+num_reviews_test = business_review_count_test$review_count
+
+try_data1_test = review_test[,c(6,7)]
+
+reviews_test = as.vector(business_test$text)
+stopWords = c(stopwords("en"), "") 
+
+clean_reviews_test = sapply(reviews_test, function(review) cleanReview(review))
+review_corpus_test = Corpus(VectorSource(clean_reviews_test))
+
+# If you use the 'cleanCorpus' function you would do 
+review_corpus_test = cleanCorpus(Corpus(VectorSource(reviews_test)))
+
+# Check out how first review looks like 
+inspect(review_corpus_test[1])
+
+# Create document term matrix - try TD-IDF
+review_dtm_test = DocumentTermMatrix(review_corpus_test)
+
+# Remove less frequent words
+review_dtm_test = removeSparseTerms(review_dtm_test, 0.8)
+inspect(review_dtm_test[1:8,1:20])
+
+X_test = as.matrix(review_dtm_test)
+X_test_normalized_by_review_count = X_test/num_reviews_test
+
+X_test_normalized_by_review_count <- X_test_normalized_by_review_count[,names(data.frame(X_test_normalized_by_review_count))%in%names(data.frame(X_train_normalized_by_review_count))]
+
+X_train_normalized_by_review_count = X_train_normalized_by_review_count[,names(data.frame(X_train_normalized_by_review_count))%in%names(data.frame(X_test_normalized_by_review_count))]
+```
+
+running models
+LASSO + Ridge
+
+```{r}
+normalize <- function(x) {
+  x <- round(x*2, 0)/2
+  x <- ifelse(x>=5, 5, ifelse(x<=1, 1, x))
+}
+
+precision <- function(prediction, true) {
+  return(sum(prediction==true)/length(true))
+}
+
+rmse <- function(prediction, true) {
+  return(sqrt(mean((prediction-true)^2)))
+}
+fold_agg <- c()
+for (i in 1:10) {
+  fold_agg <- c(fold_agg, rep(i, ceiling(length(y_train)/ 10)))
+}
+fold_agg <- sample(fold_agg, size = length(y_train), replace = FALSE)
+
+agg_model_lasso <- cv.glmnet(X_train_normalized_by_review_count, y_train, alpha = 1, type.measure = "class", foldid = fold_agg)
+lasso_agg_stars <- predict.cv.glmnet(agg_model_lasso, X_train_normalized_by_review_count, type = "response")
+agg_lasso_rmse <- rmse(lasso_agg_stars,y_train)
+agg_lasso_precision <- precision(normalize(lasso_agg_stars),normalize(y_train))
+
+agg_model_ridge <- cv.glmnet(X_train_normalized_by_review_count, y_train, alpha = 0, type.measure = "class", foldid = fold_agg)
+ridge_agg_stars <- predict.cv.glmnet(agg_model_ridge, X_train_normalized_by_review_count, type = "response")
+agg_ridge_rmse <- rmse(ridge_agg_stars,y_train)
+agg_ridge_precision <- precision(normalize(ridge_agg_stars),normalize(y_train))
+
+
+lasso_word_frequency <- predict.cv.glmnet(agg_model_lasso, as.matrix(X_test_normalized_by_review_count), type="response")
+ridge_word_frequency <- predict.cv.glmnet(agg_model_ridge, as.matrix(X_test_normalized_by_review_count), type="response")
+
+
+#Outputting prediction results 
+business_ids = business_test$Group.1
+
+output_lasso = cbind(business_ids, data.frame(lasso_word_frequency)[1])
+colnames(output_lasso) = c("business_id", "stars")
+
+output_ridge = cbind(business_ids, data.frame(ridge_word_frequency)[1])
+colnames(output_ridge) = c("business_id", "stars")
+
+write.csv(output_lasso, file = "fu_charles_lasso.csv", row.names = FALSE)
+write.csv(output_ridge, file = "fu_charles_ridge.csv", row.names = FALSE)
+```
+
+Code from Charles
+```{r}
+submission = read.csv("data/submission.csv")
+result_test_6aggrlassorfnot_round = read.csv("data/result_test_6aggrlassorfnot-round.csv")
+result_test_3aggrlasso_not_round = read.csv("data/result_test_3aggrlasso-not-round.csv")
+lasso_aggregate = read.csv("data/lasso_aggregate.csv")
+ridge_aggregate = read.csv("data/ridge_aggregate.csv")
+
+
+normalize <- function(x) {
+  z <- round(x*2, 0)/2
+  z <- ifelse(z>=5, 5, ifelse(z<=1, 1, z))
+  return(z)
+}
+
+precision <- function(prediction, true) {
+  return(sum(prediction==true)/length(true))
+}
+
+rmse <- function(prediction, true) {
+  return(sqrt(mean((prediction-true)^2)))
+}
+
+max_freq <- function(list) {
+  if(sum(max(table(list))==table(list))>1){
+    return(normalize(mean(list)))
+  } 
+  return(as.double(names(which.max(table(c(stacked.2[i,2], stacked.2[i,3], stacked.2[i,4]))))))
+}
+
+stacked <- data.frame(submission$business_id,as.numeric(result_test_6aggrlassorfnot_round$stars), as.numeric(result_test_3aggrlasso_not_round$stars), as.numeric(submission$stars), as.numeric(lasso_aggregate$stars))
+for(i in 1:nrow(stacked)){
+  stacked[i,6] <- mean(c(stacked[i,2], stacked[i,3], stacked[i,4], stacked[i,5]))
+}
+stacked <- data.frame(stacked[,1], stacked[,6], stacked[,c(2, 3, 4, 5)])
+names(stacked) <- c("business_id", "stars", "stars.1", "stars.2", "stars.3", "stars.4")
+write.csv(stacked[,c(1,2)], "stacked_result.csv", row.names = FALSE)
+
+stacked.2 <- data.frame(submission$business_id, data.frame(normalize(result_test_6aggrlassorfnot_round$stars), normalize(result_test_3aggrlasso_not_round$stars), normalize(submission$stars), normalize(output_lasso$stars), normalize(output_ridge$stars)))
+for(i in 1:nrow(stacked.2)){
+  stacked.2[i,7] <- median(c(stacked.2[i,2], stacked.2[i,3], stacked.2[i,4], stacked.2[i,5], stacked.2[i,6]))
+}
+stacked.2 <- data.frame(stacked.2[,1], stacked.2[,7], stacked.2[,c(2, 3, 4, 5, 6)])
+names(stacked.2) <- c("business_id", "stars", "stars.1", "stars.2", "stars.3", "stars.4", "stars.5")
+write.csv(stacked.2[c(1,2)], "stacked.2_result.csv", row.names = FALSE)
+
+stacked.3 <- data.frame(submission$business_id, data.frame(normalize(result_test_6aggrlassorfnot_round$stars), normalize(result_test_3aggrlasso_not_round$stars), normalize(submission$stars), normalize(output_lasso$stars), normalize(output_ridge$stars), normalize(lasso_aggregate$stars), normalize(ridge_aggregate$stars)))
+for(i in 1:nrow(stacked.3)){
+  stacked.3[i,7] <- max_freq(c(stacked.3[i,2], stacked.3[i,3], stacked.3[i,4], stacked.3[i,5], stacked.3[i,6], stacked.3[i,7], stacked.3[i,8]))
+}
+stacked.3 <- data.frame(stacked.3[,1], stacked.3[,7], stacked.3[,c(2, 3, 4, 5, 6, 7, 8)])
+names(stacked.3) <- c("business_id", "stars", "stars.1", "stars.2", "stars.3", "stars.4", "stars.5", "stars.6", "stars.7")
+write.csv(stacked.3[c(1,2)], "stacked.3_result.csv", row.names = FALSE)
+
+```
+
+
+
